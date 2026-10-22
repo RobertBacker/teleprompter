@@ -295,7 +295,8 @@ $('#file').addEventListener('change',e=>{
 });
 
 /* ---------- Text model ---------- */
-const NUM={zero:'0',one:'1',two:'2',three:'3',four:'4',five:'5',six:'6',seven:'7',eight:'8',nine:'9',ten:'10'};
+const NUM={zero:'0',one:'1',two:'2',three:'3',four:'4',five:'5',six:'6',seven:'7',eight:'8',nine:'9',ten:'10',eleven:'11',twelve:'12',thirteen:'13',fourteen:'14',fifteen:'15',sixteen:'16',seventeen:'17',eighteen:'18',nineteen:'19',twenty:'20',thirty:'30',forty:'40',fifty:'50',sixty:'60',seventy:'70',eighty:'80',ninety:'90',hundred:'100'};
+function splitWord(w){const out=[];for(const part of w.split(/[-–—\/_]+/)){const n=norm(part);if(!n)continue;for(const q of n.split(/(?<=[a-z])(?=[0-9])|(?<=[0-9])(?=[a-z])/))if(q)out.push(NUM[q]||q);}return out;}
 const STOP=new Set('a an the of to and or in on at is it its be are was were as for with by that this so we i you our my from but not if then than there their they he she his her them do does did have has had will can just into also'.split(' '));
 function norm(w){
   let s=w.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/['’`]/g,'').replace(/[^a-z0-9]/g,'');
@@ -352,7 +353,7 @@ function build(text){
         first=false;
         const s=document.createElement('span');s.textContent=m[0];
         if(m[0][0]==='['&&m[0].endsWith(']')){s.className='cue';pe.appendChild(s);continue;}
-        const parts=m[0].split(/[-–—\/]+/).map(norm).filter(Boolean);
+        const parts=splitWord(m[0]);
         if(parts.length){
           s.className='w';s.dataset.t=tokens.length;s._si=spans.length;spans.push(s);
           for(const n of parts)tokens.push({n,w:weight(n),el:s});
@@ -367,7 +368,7 @@ function build(text){
 }
 
 /* ---------- Position, painting, scrolling ---------- */
-let pos=0,painted=0,nowEl=null,markerPx=0;
+let pos=0,vpos=0,painted=0,nowEl=null,markerPx=0,colPad=0,colInner=1;
 const reduceMotion=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
 function paint(p){
   const a=Math.min(painted,p),b=Math.max(painted,p);
@@ -380,11 +381,15 @@ function paint(p){
 function targetFor(p){
   if(!tokens.length)return 0;
   const el=tokens[Math.min(p,tokens.length-1)].el;
-  return Math.max(0,col.offsetTop+el.offsetTop+el.offsetHeight/2-markerPx);
+  // move smoothly through each line: start of line sits just below the marker, end of line just above
+  const frac=p>=tokens.length?1:Math.max(0,Math.min(1,(el.offsetLeft-colPad)/colInner));
+  return Math.max(0,col.offsetTop+el.offsetTop+el.offsetHeight/2-markerPx+(frac-0.5)*lineHeightPx()*0.9);
 }
 let curTop=0,tgtTop=0,animating=false,userScroll=false;
 function scrollToPos(instant){
-  tgtTop=targetFor(pos);
+  const t=targetFor(vpos);
+  if(!instant&&t<tgtTop&&tgtTop-t<lineHeightPx()*0.6)return; // ignore tiny backward corrections
+  tgtTop=t;
   if(instant||reduceMotion){stage.scrollTop=tgtTop;curTop=stage.scrollTop;return;}
   if(!animating){animating=true;curTop=stage.scrollTop;requestAnimationFrame(step);}
 }
@@ -408,14 +413,34 @@ let advanced=0;
 function setPos(p,manual,noScroll){
   p=Math.max(0,Math.min(tokens.length,p));
   if(!manual&&listening&&p>pos&&p-pos<30)advanced+=p-pos;
-  pos=p;paint(p);
-  if(!noScroll)scrollToPos(false);
-  progress.style.width=(tokens.length?(100*p/tokens.length):0)+'%';
+  pos=p;
+  if(manual||p>=vpos||vpos-p>6)vpos=p; // keep a prediction that is only slightly ahead
+  show(noScroll);
 }
+function show(noScroll){
+  paint(vpos);
+  if(!noScroll)scrollToPos(false);
+  progress.style.width=(tokens.length?(100*vpos/tokens.length):0)+'%';
+}
+/* Prediction: between recognised words, keep moving at your measured pace for a few words */
+let rate=2.2,confirmAt=0,lastResultAt=0;
+function noteConfirm(np,oldPos){
+  const now=Date.now(),dt=(now-confirmAt)/1000,d=np-oldPos;
+  if(confirmAt&&dt>0.2&&dt<4&&d>0&&d<=20)rate=0.7*rate+0.3*Math.max(0.8,Math.min(5,d/dt));
+  confirmAt=now;
+}
+setInterval(()=>{
+  if(!open||S.mode!=='voice'||!listening||userScroll||!tokens.length)return;
+  const now=Date.now();
+  if(now-lastResultAt>1200||!confirmAt)return; // you've paused: hold still
+  const ahead=Math.min(5,Math.floor(rate*((now-confirmAt)/1000+0.4)));
+  const v=Math.min(tokens.length,pos+ahead);
+  if(v>vpos){vpos=v;show(false);}
+},120);
 function lineStep(dir){
   if(!tokens.length)return;
-  if(pos>=tokens.length&&dir>0)return;
-  const cur=tokens[Math.min(pos,tokens.length-1)].el,si=cur._si,top=cur.offsetTop;
+  if(vpos>=tokens.length&&dir>0)return;
+  const cur=tokens[Math.min(vpos,tokens.length-1)].el,si=cur._si,top=cur.offsetTop;
   if(dir>0){
     for(let i=si+1;i<spans.length;i++){if(spans[i].offsetTop>top+2){setPos(+spans[i].dataset.t,true);afterManual();return;}}
     setPos(tokens.length,true);afterManual();
@@ -427,18 +452,18 @@ function lineStep(dir){
   }
 }
 function afterManual(){
-  lastMatchAt=Date.now();heardSince=0;
+  lastMatchAt=Date.now();heardSince=0;confirmAt=0;
   if(S.mode==='steady'){sTop=targetFor(pos);stage.scrollTop=sTop;}
 }
 
 /* ---------- Voice matching ---------- */
 let lastKey='',lastMatchAt=Date.now(),heardSince=0;
 const MAXH=8;
-function tokenizeHeard(txt){return txt.split(/[\s\-–—\/]+/).map(norm).filter(Boolean);}
+function tokenizeHeard(txt){const o=[];for(const w of txt.split(/\s+/))for(const t of splitWord(w))o.push(t);return o;}
 let dpA=new Float32Array(64),dpB=new Float32Array(64);
 function scoreAt(h,j,W){
   const M=h.length,s0=Math.max(0,j-W+1),L=j-s0+1,tj=tokens[j].n;
-  let ok=false;for(let i=Math.max(0,M-3);i<M;i++)if(sim(h[i],tj)>0){ok=true;break;}
+  let ok=false;for(let i=Math.max(0,M-4);i<M;i++)if(sim(h[i],tj)>0){ok=true;break;}
   if(!ok)return 0;
   if(dpA.length<L+1){dpA=new Float32Array(L+8);dpB=new Float32Array(L+8);}
   let prev=dpA,cur=dpB;prev.fill(0,0,L+1);
@@ -468,15 +493,16 @@ function align(h){
   const np=best+1,jump=np-pos;
   let need;
   if(jump>=0&&jump<=3)need=0.95;
-  else if(jump>3&&jump<=12)need=1.7;
-  else if(jump>12&&jump<=45)need=2.6;
+  else if(jump>3&&jump<=12)need=1.4;
+  else if(jump>12&&jump<=45)need=2.3;
   else if(jump>45)need=3.6;
   else need=3.2; // going backwards
-  if(bestRaw>=need&&np!==pos){setPos(np,false);lastMatchAt=Date.now();heardSince=0;}
+  if(bestRaw>=need&&np!==pos){const old=pos;setPos(np,false);noteConfirm(np,old);lastMatchAt=Date.now();heardSince=0;}
   else if(bestRaw>=need)lastMatchAt=Date.now();
 }
 const heardEl=$('#heard');
 function onHeard(txt){
+  lastResultAt=Date.now();
   if(userScroll)return;
   heardEl.textContent=S.showHeard?txt.trim().split(/\s+/).slice(-12).join(' '):'';
   const toks=tokenizeHeard(txt).slice(-MAXH);
@@ -670,6 +696,8 @@ function layout(){
   col.style.paddingTop=markerPx+'px';col.style.paddingBottom=h+'px';
   const lh=lineHeightPx();
   marker.style.top=(markerPx-lh/2)+'px';marker.style.height=lh+'px';
+  colPad=parseFloat(getComputedStyle(col).paddingLeft)||0;
+  colInner=Math.max(1,col.clientWidth-2*colPad);
 }
 function applyStyle(){
   col.style.fontSize=S.font+'px';
@@ -737,7 +765,7 @@ function endUserSoon(){
   idleT=setTimeout(()=>{
     if(touching)return;
     userScroll=false;
-    const p=tokenAtMarker();setPos(p,true,true);curTop=stage.scrollTop;sTop=stage.scrollTop;
+    const p=tokenAtMarker();setPos(p,true,true);curTop=stage.scrollTop;tgtTop=stage.scrollTop;sTop=stage.scrollTop;confirmAt=0;
     lastMatchAt=Date.now();heardSince=0;lastKey='';
   },700);
 }
@@ -804,7 +832,7 @@ function toast(msg,ms){const t=$('#toast');t.textContent=msg;t.hidden=false;clea
 refreshModel();
 
 /* Test hook (harmless): lets the matcher be exercised without a microphone */
-window.__teleprompter={onHeard:t=>{onHeard(t);return pos;},get pos(){return pos;},get total(){return tokens.length;}};
+window.__teleprompter={onHeard:t=>{onHeard(t);return pos;},get pos(){return pos;},get vpos(){return vpos;},get total(){return tokens.length;}};
 })();
 </script>
 </body>
